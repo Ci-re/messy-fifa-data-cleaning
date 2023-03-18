@@ -1,51 +1,54 @@
 setwd("fifa data cleaning/")
 
-# install.packages("janitor")
-# install.packages("tidyr") 
-# install.packages("plyr")
-# install.packages("scales")
-# install.packages("data.cube")
 # install.packages("data.cube", repos = paste0("https://", c(
 #   "jangorecki.gitlab.io/data.cube",
 #   "cloud.r-project.org"
 # )))
 
-library(readxl)
 library(tidyr)
 library(tidyverse)
-library(plyr)
 library(scales)
 library(data.cube)
+library(stringi)
 
 FIFA1 <- read_csv("fifa21_raw_data.csv")
 FIFA2 <- read_csv("fifa21 raw data v2.csv")
 
 head(FIFA2)
 fifa_cleaned <- FIFA2 |> janitor::clean_names()
-colnames(fifa_cleaned)
 
 ## Data overview
 glimpse(fifa_cleaned)
 
+## Check for duplicate entries
+fifa_cleaned[duplicated(fifa_cleaned$id),]
+
+## Clean the club name -> remove special characters in club name and players long name
 fifa_cleaned <- fifa_cleaned |> 
-  mutate(club = str_replace_all(club,"\\n","")) |> 
-  separate(contract, c("contract_start","contract_end"), " ~ ", convert = TRUE)
+  mutate(club = str_replace_all(club,"\\n","") |> stri_trans_general("Latin-ASCII") |> str_trim()) |> 
+  separate(contract, c("contract_start","contract_end"), " ~ ", convert = TRUE) |> 
+  mutate(long_name = stri_trans_general(long_name, "Latin-ASCII") |> str_trim())
 
+## Clean dates that aren't standardized to years -> also add contract_type column
 fifa_cleaned <- fifa_cleaned |> 
-  separate(contract_start , c("contract_start","contract_status"), " On ", convert = TRUE) |> 
-  mutate(contract_status = ifelse(str_detect(contract_start, "Free"), contract_start, contract_status )) |> 
-  mutate(contract_status = ifelse(is.na(contract_status), "Contract", contract_status)) |> 
-  mutate(contract_start = ifelse(str_detect(contract_start, ","), lubridate::year(as.Date(contract_start, "%b %d, %Y")), as.numeric(contract_start)))
+  separate(
+    contract_start , c("contract_start","contract_type"), " On ", convert = TRUE
+  ) |> 
+  mutate(
+    contract_type = ifelse(
+      str_detect(contract_start, "Free"), contract_start, contract_type )
+    ) |> 
+  mutate(
+    contract_type = ifelse(
+      is.na(contract_type), "Contract", contract_type)
+    ) |> 
+  mutate(
+    contract_start = ifelse(
+      str_detect(contract_start, ","), lubridate::year(as.Date(contract_start, "%b %d, %Y")), as.numeric(contract_start))
+    ) |> 
+  mutate(
+    contract_end = ifelse(is.na(contract_end) & contract_type == "Loan", lubridate::year(as.Date(loan_date_end, "%b %d, %Y")), contract_end))
 
-## Clean dates that aren't standardized to years
-c <- fifa_cleaned |> mutate(
-  contract_date = lubridate::year(as.Date(contract_start, "%b %d, %Y"))
-)
-
-c$contract_date
-fifa_cleaned$contract_start
-fifa_cleaned$contract_status
-head(fifa_cleaned)
 
 ## Clean the weight column -> function
 weight_cleaner <- function(weight){
@@ -84,16 +87,15 @@ fifa_cleaned2 <- fifa_cleaned |>
 
 ## Convert values in both height and weight column to numeric -> remove all characters
 fifa_cleaned2 <- fifa_cleaned2 |> 
-  mutate(height = str_replace_all(height,"cm","")) |> 
-  mutate(height = as.numeric(height)) |> 
-  mutate(weight = str_replace_all(weight, "kg","")) |> 
-  mutate(weight = as.numeric(weight)) |> 
+  mutate(height = str_replace_all(height,"cm","") |> as.numeric(height)) |> 
+  mutate(weight = str_replace_all(weight, "kg","") |> as.numeric(weight)) |> 
   as.data.frame()
 
-## Clean  column money columns -> function + case_when
-clean_currency <- function(currency_list){
-  numeric_val <- as.numeric(gsub("[^0-9.-]", "", currency_list))
-  standard <- gsub("[^A-Z]","",currency_list)
+
+## Clean column money columns -> function + case_when
+clean_currency <- function(amount){
+  numeric_val <- as.numeric(gsub("[^0-9.-]", "", amount))
+  standard <- gsub("[^A-Z]","",amount)
   standard <- case_when(
     standard == "M" ~ 1000000,
     standard == "K" ~ 1000,
@@ -109,10 +111,10 @@ fifa_cleaned3 <- fifa_cleaned2 |>
   mutate(wage = clean_currency(wage)) |> 
   mutate(release_clause = clean_currency(release_clause))
 
-## Add the currency to 
-fifa_cleaned3 <- fifa_cleaned3 |> 
-  mutate(value = currency.format(value, currency.sym = "€")) |> 
-  mutate(wage = currency.format(wage, currency.sym = "€")) |> 
+## Add the currency to wage, value and release_clause if necessary 
+fifa_cleaned3 <- fifa_cleaned3 |>
+  mutate(value = currency.format(value, currency.sym = "€")) |>
+  mutate(wage = currency.format(wage, currency.sym = "€")) |>
   mutate(release_clause = currency.format(release_clause, currency.sym = "€"))
 
 ## Remove stars symbol from rating columns -> function
@@ -122,28 +124,33 @@ remove_stars <- function(char_list){
 }
 
 ## Implement remove_stars function for columns -> ir, w_f, and sm
-fifa_cleaned5 <- fifa_cleaned3 |> 
+fifa_cleaned4 <- fifa_cleaned3 |> 
   mutate(ir = remove_stars(ir)) |> 
   mutate(w_f = remove_stars(w_f)) |> 
   mutate(sm = remove_stars(sm))
 
 ## Cleaning and standardizing the date columns -> Joined and loan_date_end
-fifa_cleaned6 <- fifa_cleaned5 |> 
+fifa_cleaned5 <- fifa_cleaned4 |> 
   mutate(joined = as.Date(joined, "%B %d, %Y")) |> 
   mutate(loan_date_end = as.Date(loan_date_end, "%B %d, %Y"))
 
 ## Convert ratings to percentage -> OVA, BOV, POT
-fifa_cleaned7 <- fifa_cleaned6 |> 
+fifa_cleaned6 <- fifa_cleaned5 |> 
   mutate(ova = percent(ova/100, suffix = "%")) |> 
   mutate(bov = percent(bov/100, suffix = "%")) |> 
   mutate(pot = percent(pot/100, suffix = "%"))
 
 ## cleaning the hits column
 ## We can use the clean_currency function
-fifa_cleaned8 <- fifa_cleaned7 |> 
+fifa_cleaned7 <- fifa_cleaned6 |> 
   mutate(hits = clean_currency(hits))
 
 
-glimpse(fifa_cleaned8)
-class(fifa_cleaned8$wage)
-fifa_cleaned8
+glimpse(fifa_cleaned7)
+
+## Drop irrelevant columns
+fifa_cleaned8 <- fifa_cleaned7 |> 
+  select(-c("positions")) |> 
+  select(id, long_name, name, nationality, club, contract_start, contract_end, contract_type, everything(), player_url, photo_url)
+
+openxlsx::write.xlsx(x = fifa_cleaned8, file = "fifa2.xlsx")
